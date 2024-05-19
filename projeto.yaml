@@ -1,0 +1,266 @@
+Parameters:
+  HighThreshold:
+    Description: The request count threshold for the high alarm (period of 10 seconds)
+    Type: Number
+    Default: 3
+
+  LowThreshold:
+    Description: The request count threshold for the low alarm (period of 60 seconds)
+    Type: Number
+    Default: 8
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  MySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+
+  MySubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+
+  AppSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Projeto App
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
+
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MySubnet
+      RouteTableId: !Ref RouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MySubnet2
+      RouteTableId: !Ref RouteTable
+
+  MyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  MyPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: MyPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - dynamodb:ListTables
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - dynamodb:*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/Games
+              - !Sub arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/Games/index/*
+      Roles:
+        - !Ref MyRole
+
+  MyInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref MyRole
+
+  #auto scaling
+  MyAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+
+      LaunchConfigurationName: !Ref MyLaunchConfiguration
+      MinSize: '1'
+      MaxSize: '5'
+      DesiredCapacity: '1'
+      AvailabilityZones:
+        - !Select
+          - 0
+          - !GetAZs ''
+        - !Select
+          - 1
+          - !GetAZs ''
+      VPCZoneIdentifier:
+        - !Ref MySubnet
+        - !Ref MySubnet2
+      TargetGroupARNs:
+        - !Ref MyTargetGroup
+
+  MyLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-0058259d73afe9f58
+      InstanceType: t2.micro
+      IamInstanceProfile: !Ref MyInstanceProfile
+      AssociatePublicIpAddress: true
+      SecurityGroups:
+        - !Ref AppSecGroup
+      UserData: !Base64 |
+        #!/bin/bash
+        sudo -u ubuntu -i <<EOF
+        cd /home/ubuntu
+        python3 /home/ubuntu/createTable.py
+        sudo systemctl start ticTacToe.service
+        sudo systemctl enable ticTacToe.service
+        EOF
+
+  MyLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref MySubnet
+        - !Ref MySubnet2
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+
+  MyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref MyVPC
+
+  MyListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref MyLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MyTargetGroup
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for MyLoadBalancer
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  MyAutoScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref MyAutoScalingGroup
+      Cooldown: 125
+      ScalingAdjustment: '1'
+
+  MyAutoScalingPolicyDown:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref MyAutoScalingGroup
+      Cooldown: 65
+      ScalingAdjustment: '-1'
+
+  RequestCountAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if request count too high
+      Namespace: AWS/ApplicationELB
+      MetricName: RequestCountPerTarget
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt MyLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt MyTargetGroup.TargetGroupFullName
+      Statistic: Sum
+      Period: 10
+      EvaluationPeriods: 6
+      DatapointsToAlarm: 1
+      Threshold: !Ref HighThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref MyAutoScalingPolicy
+
+  RequestCountAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if request count too low
+      Namespace: AWS/ApplicationELB
+      MetricName: RequestCountPerTarget
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt MyLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt MyTargetGroup.TargetGroupFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 1
+      Threshold: !Ref LowThreshold
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref MyAutoScalingPolicyDown
+Outputs:
+  LoadBalancerDNSName:
+    Description: The DNS name of the Load Balancer
+    Value: !GetAtt MyLoadBalancer.DNSName
