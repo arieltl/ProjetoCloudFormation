@@ -158,7 +158,6 @@ Resources:
       ImageId: ami-0058259d73afe9f58
       InstanceType: t2.micro
       IamInstanceProfile: !Ref MyInstanceProfile
-      AssociatePublicIpAddress: true
       SecurityGroups:
         - !Ref AppSecGroup
       UserData: !Base64 |
